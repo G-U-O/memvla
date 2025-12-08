@@ -49,6 +49,18 @@ class PrismaticVLM(VLM):
         arch_specifier: str = "gelu-mlp",
         **kwargs,
     ) -> None:
+        """
+        初始化 PrismaticVLM 实例。
+
+        Args:
+            model_id: 模型唯一标识符
+            vision_backbone: 视觉主干网络，用于处理图像输入
+            llm_backbone: 语言模型主干网络，用于处理文本输入
+            enable_mixed_precision_training: 是否启用混合精度训练，默认为 True
+            arch_specifier: 架构指定符，决定投影层类型，默认为 "gelu-mlp"
+            **kwargs: 其他传递给父类的参数
+        """
+        # 调用父类 VLM 的初始化方法
         super().__init__(
             "prismatic",
             model_id,
@@ -57,32 +69,38 @@ class PrismaticVLM(VLM):
             enable_mixed_precision_training=enable_mixed_precision_training,
         )
 
-        # Set Weight Initialization Seed for Projector Consistency
+        # 设置权重初始化种子以确保投影层的一致性
         torch.manual_seed(vision_backbone.embed_dim)
 
-        # Initialize Projection (Adapter) based on `arch_specifier`
+        # 根据架构指定符初始化投影层（适配器）
         self.arch_specifier = arch_specifier
         if arch_specifier == "linear":
+            # 线性投影层
             self.projector = LinearProjector(vision_backbone.embed_dim, llm_backbone.embed_dim)
         elif arch_specifier.endswith("fused-gelu-mlp"):
+            # 融合 GELU 激活函数的多层感知机投影层
             self.projector = FusedMLPProjector(vision_backbone.embed_dim, llm_backbone.embed_dim)
         elif arch_specifier.endswith("gelu-mlp"):
+            # 带 GELU 激活函数的多层感知机投影层
             self.projector = MLPProjector(vision_backbone.embed_dim, llm_backbone.embed_dim)
         else:
+            # 不支持的架构指定符抛出异常
             raise ValueError(f"PrismaticVLM with `{arch_specifier = }` is not supported!")
 
-        # Trackers
+        # 追踪视觉主干网络是否需要梯度更新
         self.vision_backbone_requires_grad = False
 
-        # Set Module Keys =>> used in Checkpoint Saving / Model Loading
+        # 设置模块键值，用于检查点保存和模型加载
         self.all_module_keys = ["vision_backbone", "llm_backbone", "projector"]
         self.trainable_module_keys = []
 
-        # === Generation Utilities ===
-        #   => For computing likelihoods --> get tokens corresponding to "True", "False" and "Yes", "No"
+        # === 生成工具 ===
+        # 用于计算似然值，获取 "True", "False", "Yes", "No" 等触发词对应的 token 索引
         self.string2idx = {}
         for trigger_string in ["True", "False", "Yes", "No"] + [chr(ord("A") + i) for i in range(26)]:
+            # 对触发字符串进行编码，不添加特殊token
             token_idx_list = self.llm_backbone.tokenizer.encode(trigger_string, add_special_tokens=False)
+            # 确保每个触发字符串只对应一个token
             assert len(token_idx_list) == 1, f'String "{trigger_string}" is tokenized as more than one token!'
             self.string2idx[trigger_string] = token_idx_list[0]
 
@@ -521,11 +539,15 @@ class PrismaticVLM(VLM):
             )
 
         return llm_output
-
     # === GenerationMixin Methods ===
     #   => Note: The following methods override the functionality of `transformers.GenerationMixin`; these expect the
     #            contract in each of the function signatures, and also expect our `forward` function to roughly take
     #            the same arguments as the underlying LLM (see `LlamaModelForCausalLM` as an example)
+
+    #===生成混合方法===
+    #=>注意：以下方法覆盖了'transformers. GenerationMisin'的功能；这些期望
+    #        在每个函数签名中收缩，并且还期望我们的“转发”函数大致采取
+    #        与底层LLM相同的参数（参见'LlamaModelForCausalLM'作为示例）
 
     def prepare_inputs_for_generation(
         self,
@@ -538,24 +560,43 @@ class PrismaticVLM(VLM):
         proprio_feat: Optional[torch.Tensor] = None,
         **kwargs: torch.Tensor,
     ) -> Dict[str, torch.Tensor]:
-        """Borrowed from `LlamaForCausalLM` --> in general, just handles caching logic during generation."""
+        """
+        为文本生成准备输入数据，主要处理缓存机制和多模态数据的整合。
+        借鉴自 `LlamaForCausalLM`，主要用于在生成过程中处理缓存逻辑。
+        Args:
+            input_ids: 输入token的ID序列
+            attention_mask: 注意力掩码，指示哪些位置是有效输入
+            pixel_values: 图像像素值，用于多模态输入
+            inputs_embeds: 输入嵌入向量，可替代input_ids直接提供嵌入
+            past_key_values: 过去的key/value缓存，用于加速生成
+            use_cache: 是否使用缓存机制
+            proprio_feat: 本体感知特征（可选）
+            **kwargs: 其他参数
+        Returns:
+            包含所有必要输入的字典
+        """
+        # 如果存在过去的key/value缓存，只需要最后一个token的input_ids
+        # 这是为了在生成过程中利用缓存，避免重复计算历史token的注意力
         if past_key_values:
             input_ids = input_ids[:, -1:]
 
-        # if `inputs_embeds` are passed, we only want to use them in the 1st generation step
+        # 如果提供了inputs_embeds且没有past_key_values，使用inputs_embeds作为模型输入
+        # 否则使用input_ids作为模型输入
+        # 这确保inputs_embeds只在第一代步骤中使用
         if inputs_embeds is not None and past_key_values is None:
             model_inputs = {"inputs_embeds": inputs_embeds}
         else:
             model_inputs = {"input_ids": input_ids}
 
-        # Make sure `pixel_values` are preserved in `model_inputs`
+        # 确保pixel_values和其他关键参数在model_inputs中得到保留
+        # 这些参数对于多模态生成至关重要
         model_inputs.update(
             {
-                "attention_mask": attention_mask,
-                "pixel_values": pixel_values,
-                "past_key_values": past_key_values,
-                "use_cache": use_cache,
-                "proprio_feat": proprio_feat,
+                "attention_mask": attention_mask,      # 注意力掩码
+                "pixel_values": pixel_values,          # 图像像素值
+                "past_key_values": past_key_values,    # 缓存的key/value对
+                "use_cache": use_cache,                # 是否使用缓存
+                "proprio_feat": proprio_feat,          # 本体感知特征
             }
         )
 
@@ -569,13 +610,25 @@ class PrismaticVLM(VLM):
         return_string_probabilities: Optional[List[str]] = None,
         **kwargs: str,
     ) -> Union[List[str], List[List[float]]]:
-        # For now, only support generation with a batch size of 1 for simplicity
+        """
+        批量生成文本，支持图像和文本的多模态输入。
+        Args:
+            pixel_values: 图像像素值，可以是张量或字典形式
+            texts: 输入文本列表
+            return_string_probabilities: 可选，需要返回概率的字符串列表
+            **kwargs: 其他传递给生成函数的参数
+        Returns:
+            生成的文本列表，或者当指定了return_string_probabilities时，返回对应的概率列表
+        """
+        # 获取语言模型的tokenizer
         tokenizer = self.llm_backbone.tokenizer
 
-        # Prepare Inputs
+        # 准备输入数据：对每个文本进行tokenize并转换为tensor
         batch_input_ids = [
             tokenizer(text, truncation=True, return_tensors="pt").input_ids.to(self.device) for text in texts
         ]
+        
+        # 处理图像数据，统一转换为设备上的张量格式
         if isinstance(pixel_values, torch.Tensor):
             pixel_values = pixel_values[None, ...].to(self.device)
         elif isinstance(pixel_values, dict):
@@ -583,13 +636,17 @@ class PrismaticVLM(VLM):
         else:
             raise ValueError(f"Unsupported `pixel_values` type = {type(pixel_values)}")
 
-        # Create Output Lists
+        # 创建输出列表
         gen_texts, gen_probabilities = [], []
 
-        # Invoke super().generate --> taps into `GenerationMixin` which (redirects) to `forward()`
+        # 获取混合精度训练的数据类型
         autocast_dtype = self.llm_backbone.half_precision_dtype
+        
+        # 启用自动混合精度进行推理
         with torch.autocast("cuda", dtype=autocast_dtype, enabled=self.enable_mixed_precision_training):
+            # 遍历批次中的每个样本
             for idx, input_ids in enumerate(batch_input_ids):
+                # 处理当前样本的图像数据
                 if isinstance(pixel_values, torch.Tensor):
                     pixel_values = pixel_values[idx]
                 elif isinstance(pixel_values, dict):
@@ -597,51 +654,68 @@ class PrismaticVLM(VLM):
                 else:
                     raise ValueError(f"Unsupported `pixel_values` type = {type(pixel_values)}")
 
-                # Handle `return_string_probabilities`
+                # 根据是否需要返回字符串概率来处理不同的生成逻辑
                 if return_string_probabilities is None:
+                    # 不需要概率信息，直接生成文本
                     full_out_ids = super().generate(input_ids=input_ids, pixel_values=pixel_values, **kwargs)
+                    # 提取生成的token IDs（去除输入部分）
                     gen_ids = full_out_ids[0, input_ids.shape[1] :]
-
-                    # Decode `gen_ids` and strip any <EOS> tokens
+                    # 解码生成的token IDs为文本，并去除特殊token和首尾空格
                     gen_texts.append(tokenizer.decode(gen_ids, skip_special_tokens=True).strip())
 
                 else:
+                    # 需要返回特定字符串的概率
                     full_out_dict = super().generate(
                         input_ids=input_ids,
                         pixel_values=pixel_values,
-                        output_scores=True,
-                        return_dict_in_generate=True,
+                        output_scores=True,              # 输出分数用于计算概率
+                        return_dict_in_generate=True,    # 返回生成过程的详细信息
                         **kwargs,
                     )
 
-                    # Generation pattern should usually be [TOKEN] <EOS> for True/False and Yes/No Generations
+                    # 提取生成的token IDs（去除输入部分）
                     gen_ids = full_out_dict.sequences[0, input_ids.shape[1] :]
 
-                    # [Debug] Verify that the first token generated is in `self.string2idx.values()`
-                    # assert gen_ids[0] in self.string2idx.values(), "Generated ID not in mapping!"
-
-                    # Decode `gen_ids` and strip any <EOS> tokens
+                    # 解码生成的token IDs为文本，并去除特殊token和首尾空格
                     gen_texts.append(tokenizer.decode(gen_ids, skip_special_tokens=True).strip())
 
-                    # Get all token probabilities --> softmax over logits
+                    # 计算所有token的概率分布（对logits进行softmax）
                     token_probs = torch.softmax(full_out_dict.scores[0][0], dim=0)
 
-                    # Get *normalized* probabilities for all values in `return_token_probabilities`
+                    # 获取指定字符串的归一化概率
+                    # 根据字符串获取对应的token索引
                     slice_idxs = torch.tensor([self.string2idx[s] for s in return_string_probabilities])
+                    # 提取这些token的概率值
                     string_probs_unnormalized = token_probs[slice_idxs]
+                    # 归一化概率分布
                     string_probs = string_probs_unnormalized / string_probs_unnormalized.sum()
+                    # 转换为numpy数组并添加到结果列表
                     gen_probabilities.append(string_probs.cpu().numpy().tolist())
 
+        # 根据是否需要概率信息返回相应结果
         return gen_texts if return_string_probabilities is None else gen_probabilities
 
     @torch.inference_mode()
     def generate(self, image: Image, prompt_text: str, **kwargs: str) -> str:
-        # For now, only support generation with a batch size of 1 for simplicity
+        """
+        根据输入图像和提示文本生成响应文本。
+        Args:
+            image: 输入的PIL图像对象
+            prompt_text: 提示文本字符串
+            **kwargs: 其他传递给生成函数的参数
+        Returns:
+            生成的文本字符串
+        """
+        # 目前为了简化实现，只支持batch size为1的生成
+        # 获取图像变换函数和语言模型的tokenizer
         image_transform, tokenizer = self.vision_backbone.image_transform, self.llm_backbone.tokenizer
 
-        # Prepare Inputs
+        # 准备输入数据
+        # 对提示文本进行tokenization处理并转换为tensor
         input_ids = tokenizer(prompt_text, truncation=True, return_tensors="pt").input_ids.to(self.device)
+        # 对图像进行预处理变换
         pixel_values = image_transform(image)
+        # 将图像数据增加一个批次维度并移至指定设备
         if isinstance(pixel_values, torch.Tensor):
             pixel_values = pixel_values[None, ...].to(self.device)
         elif isinstance(pixel_values, dict):
@@ -649,17 +723,20 @@ class PrismaticVLM(VLM):
         else:
             raise ValueError(f"Unsupported `pixel_values` type = {type(pixel_values)}")
 
-        # Invoke super().generate --> taps into `GenerationMixin` which (redirects) to `forward()`
+        # 调用父类的generate方法进行文本生成 --> 利用`GenerationMixin`的功能，实际会调用本类的forward方法
+        # 获取语言模型的半精度数据类型用于混合精度推理
         autocast_dtype = self.llm_backbone.half_precision_dtype
         with torch.autocast("cuda", dtype=autocast_dtype, enabled=self.enable_mixed_precision_training):
             # fmt: off
             generated_ids = super().generate(
-                input_ids=input_ids,            # Shape: [1, seq]
-                pixel_values=pixel_values,      # Shape: [1, 3, res, res] or Dict[str, Shape[1, 3, res, res]]
+                input_ids=input_ids,            # 输入token IDs，形状: [1, seq]
+                pixel_values=pixel_values,      # 图像像素值，形状: [1, 3, res, res] 或 Dict[str, Shape[1, 3, res, res]]
                 **kwargs
             )
             # fmt: on
 
+        # 解码生成的token IDs为文本字符串
+        # 仅解码生成的部分（去除输入部分），跳过特殊token并去除首尾空格
         generated_text = tokenizer.decode(generated_ids[0, input_ids.shape[1] :], skip_special_tokens=True).strip()
 
         return generated_text
