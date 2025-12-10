@@ -97,90 +97,91 @@ class LLMBackbone(nn.Module, ABC):
         return self.tokenizer.pad_token_id
 
 
-# === Abstract Base Class for Arbitrary HF Causal LLMs ===
+# === 抽象基类：任意HF因果语言模型 ===
 class HFCausalLLMBackbone(LLMBackbone, ABC):
+    """HuggingFace因果语言模型的通用实现基类"""
+    
     def __init__(
         self,
-        llm_backbone_id: str,
-        llm_family: str,
-        llm_cls: Type[PreTrainedModel],
-        hf_hub_path: str,
-        llm_max_length: int = 2048,
-        hf_token: Optional[str] = None,
-        inference_mode: bool = False,
-        use_flash_attention_2: bool = False,
+        llm_backbone_id: str,          # LLM骨干网络标识符
+        llm_family: str,               # LLM家族名称（如Llama、Mistral等）
+        llm_cls: Type[PreTrainedModel], # 实际的模型类（如LlamaForCausalLM）
+        hf_hub_path: str,              # HF Hub上的模型路径
+        llm_max_length: int = 2048,    # 最大序列长度
+        hf_token: Optional[str] = None, # HF访问令牌
+        inference_mode: bool = False,  # 是否为推理模式
+        use_flash_attention_2: bool = False, # 是否使用Flash Attention 2
     ) -> None:
+        # 调用父类初始化
         super().__init__(llm_backbone_id)
         self.llm_family = llm_family
         self.llm_max_length = llm_max_length
         self.inference_mode = inference_mode
 
-        # Initialize LLM (downloading from HF Hub if necessary) --> `llm_cls` is the actual {Model}ForCausalLM class!
-        #   => Note: We're eschewing use of the AutoModel API so that we can be more explicit about LLM-specific details
+        # 初始化LLM（必要时从HF Hub下载）
+        # 注意：我们避免使用AutoModel API以便更明确地处理LLM特定细节
         if not self.inference_mode:
+            # 训练模式：加载预训练权重
             overwatch.info(f"Loading [bold]{llm_family}[/] LLM from [underline]`{hf_hub_path}`[/]", ctx_level=1)
             self.llm = llm_cls.from_pretrained(
                 hf_hub_path,
                 token=hf_token,
                 use_flash_attention_2=use_flash_attention_2 if not self.inference_mode else False,
-                # The following parameters are set to prevent `UserWarnings` from HF; we want greedy decoding!
+                # 设置以下参数防止HF产生警告；我们需要贪婪解码
                 do_sample=False,
                 temperature=1.0,
                 top_p=1.0,
             )
 
-        # [Contract] `inference_mode` means we're loading from a pretrained checkpoint; no need to load base weights!
+        # [约定] inference_mode表示我们从预训练检查点加载；无需加载基础权重
         else:
+            # 推理模式：仅构建模型结构，不加载权重
             overwatch.info(f"Building empty [bold]{llm_family}[/] LLM from [underline]`{hf_hub_path}`[/]", ctx_level=1)
             llm_config = AutoConfig.from_pretrained(hf_hub_path, token=hf_token)
             self.llm = llm_cls._from_config(llm_config)
 
-        # Lightweight Handling (with extended explanation) for setting some LLM Parameters
-        #   => Set `decoder.use_cache = False` --> incompatible with gradient checkpointing (+ training in general)
-        #
-        #      Reference: https://discuss.huggingface.co/t/what-is-the-purpose-of-use-cache-in-decoder/958
+        # 轻量级处理：设置一些LLM参数
+        # => 设置 decoder.use_cache = False --> 与梯度检查点不兼容（一般训练时）
+        # 参考：https://discuss.huggingface.co/t/what-is-the-purpose-of-use-cache-in-decoder/958
         self.llm.config.use_cache = False if not self.inference_mode else True
 
-        #   => Turns out that when gradient checkpointing is on and the underlying LLM has no "trainable" parameters
-        #      (requires_grad is False), backprop will fail; setting `enable_input_requires_grad()` registers a new
-        #      forward hook that fixes this =>> also totally safe for the "full finetuning" setting!
+        # => 当启用梯度检查点且底层LLM没有"可训练"参数（requires_grad为False）时，
+        #    反向传播会失败；设置enable_input_requires_grads()注册一个新的前向钩子来解决此问题
+        #    对于"全微调"设置也完全安全
         if not self.inference_mode:
             self.llm.enable_input_require_grads()
 
-        # Load (Fast) Tokenizer
+        # 加载（快速）分词器
         overwatch.info(f"Loading [bold]{llm_family}[/] (Fast) Tokenizer via the AutoTokenizer API", ctx_level=1)
         self.tokenizer = AutoTokenizer.from_pretrained(
             hf_hub_path, model_max_length=self.llm_max_length, token=hf_token, padding_side="right"
         )
 
-        # Validation =>> Our VLM logic currently operates under the assumption that the tokenization of a new input
-        #                starts with a <BOS> token unless `add_special_tokens = False`; for these models, we empirically
-        #                find that adding image patches *after* the BOS leads to much better performance.
-        #
-        # As a result we explicitly validate that a tokenizer conforms to the expected behavior; if you're reading this
-        # line, it's probably because you're adding a new LLM with a different tokenizer behavior. If so, feel free to
-        # override the `SPECIAL_CASES` set below, but make sure to make the appropriate changes in the `datasets.py`
-        # and VLM `forward()` logic!
+        # 验证 => 我们的VLM逻辑假设新输入的标记化以<BOS>标记开始，除非add_special_tokens=False；
+        #         对于这些模型，我们经验性地发现，在BOS之后添加图像块效果更好。
+        # 因此我们显式验证分词器符合预期行为；如果您读到这里，可能是因为您正在添加一个具有不同分词器行为的新LLM。
+        # 如果是这样，请随意覆盖下面的SPECIAL_CASES集合，但请确保在datasets.py和VLM的forward()逻辑中做出相应更改！
+        
+        # 特殊情况处理
         SPECIAL_CASES = {
-            # Phi-2 Tokenizer doesn't add any BOS tokens by default, and sets BOS == EOS == "<|endoftext|>"
-            #   =>> We'll prepend BOS to first input (to play nicely with image token insertion logic; verified that
-            #       this works well with base LLM generation.
-            #   =>> Like Llama-2 Tokenizers -- we'll add a special PAD token for training purposes.
+            # Phi-2分词器默认不添加任何BOS标记，并将BOS == EOS == ""
+            # => 我们会在第一个输入前加上BOS（与图像标记插入逻辑配合良好；已验证对基础LLM生成有效）
+            # => 类似Llama-2分词器 -- 我们会添加特殊的PAD标记用于训练目的
             "phi-2-3b",
         }
         if self.identifier in SPECIAL_CASES:
             return
 
-        # Note =>> this assert should hold for all Llama-derived tokenizers (`LlamaTokenizerFast` ==> includes Mistral!
+        # 注意 => 这个断言应该适用于所有Llama衍生的分词器（LlamaTokenizerFast ==> 包括Mistral！）
         assert (self.tokenizer("Test 123", add_special_tokens=True).input_ids[0] == self.tokenizer.bos_token_id) and (
             self.tokenizer("Test 123", add_special_tokens=False).input_ids[0] != self.tokenizer.bos_token_id
         ), (
             f"Default Tokenizer of type `{type(self.tokenizer)}` does not automatically prefix inputs with BOS token!\n"
-            "Please read the comment in `base_llm.py` for more information!"
+            "Please read the comment in [base_llm.py](file://d:\doctor-code\code\MemoryVLA-openvla-codebase\MemoryVLA-openvla-codebase\prismatic\models\backbones\llm\base_llm.py) for more information!"
         )
 
     def get_fsdp_wrapping_policy(self) -> Callable:
-        """Return a `transformer_auto_wrap_policy` where we wrap each instance of `self.transformer_layer_cls`"""
+        """返回一个transformer_auto_wrap_policy，其中包装每个self.transformer_layer_cls实例"""
         transformer_block_policy = partial(
             transformer_auto_wrap_policy, transformer_layer_cls={self.transformer_layer_cls}
         )
@@ -188,13 +189,14 @@ class HFCausalLLMBackbone(LLMBackbone, ABC):
         return transformer_block_policy
 
     def enable_gradient_checkpointing(self) -> None:
-        """Dispatch to underlying LLM instance's `gradient_checkpointing_enable`; defined for all `PretrainedModel`."""
+        """调度到底层LLM实例的gradient_checkpointing_enable；为所有PretrainedModel定义"""
         self.llm.gradient_checkpointing_enable()
 
     def embed_input_ids(self, input_ids: torch.LongTensor) -> torch.Tensor:
+        """将输入ID嵌入为向量表示"""
         return self.llm.get_input_embeddings()(input_ids)
 
-    # [Contract] Should match the `forward` call of the underlying `llm` instance!
+    # [约定] 应该匹配底层llm实例的forward调用！
     def forward(
         self,
         input_ids: Optional[torch.LongTensor] = None,
@@ -208,6 +210,7 @@ class HFCausalLLMBackbone(LLMBackbone, ABC):
         output_hidden_states: Optional[bool] = None,
         return_dict: Optional[bool] = None,
     ) -> CausalLMOutputWithPast:
+        """执行前向传播"""
         output: CausalLMOutputWithPast = self.llm(
             input_ids=input_ids,
             attention_mask=attention_mask,

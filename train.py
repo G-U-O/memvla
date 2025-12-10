@@ -80,7 +80,7 @@ class TrainConfig:
 
     # VLAConfig (`conf/vla.py`); override with --vla.type `VLARegistry.<VLA>.vla_id`
     # VLA配置 (`conf/vla.py`); 可通过 --vla.type `VLARegistry.<VLA>.vla_id` 覆盖
-    # vla_id: "prism-dinosiglip-224px+oxe+diffusion"
+    # FIXME vla_id: "prism-dinosiglip-224px+oxe+diffusion"
     vla: VLAConfig = field(
         default_factory=VLAConfig.get_choice_class(VLARegistry.EXP_COGACT_OXE_MAGIC_SOUP_PLUS_MINUS.vla_id)
     )
