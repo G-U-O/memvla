@@ -157,6 +157,14 @@ def train(cfg: TrainConfig) -> None:
     # Note => Under `torchrun` initializing `overwatch` will automatically set up `torch.distributed`
     # 注意 =>> 在 `torchrun` 下，初始化 [overwatch] 会自动设置 `torch.distributed`    torch.cuda.set_device(device_id := overwatch.local_rank())
     torch.cuda.empty_cache()
+    #  --vla.type prism-dinosiglip-224px+oxe+diffusion \
+    #  --vla.data_mix ${data_mix} \
+    #  --vla.expected_world_size ${n_gpu} \
+    #  --vla.per_device_batch_size ${bs} \
+    #  --vla.global_batch_size $((n_gpu * bs)) \
+    #  --vla.learning_rate 2e-5 \
+    #  --vla.max_steps 20000 \
+    #  --vla.shuffle_buffer_size ${shuffle_buffer_size} \
 
     # Configure Unique Run Name & Save Directory 配置唯一的运行名称和保存目录
     vla_id = cfg.vla.vla_id
