@@ -1,21 +1,42 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
+"""
+提取和汇总LIBERO评估结果的脚本
+该脚本用于解析评估日志文件并生成成功率统计表
+"""
+
 import os
 import re
 from collections import defaultdict
 
-# ===== user inputs =====
+# ===== 用户输入 =====
 ckpt_paths = [
-    # Add your log root directories here
-    # such as: ./log/libero/memvla_libero_spatial--image_aug
+    # 在此处添加您的日志根目录
+    # 例如: ./log/libero/memvla_libero_spatial--image_aug
 ]
 
-# ===== regex =====
+# ===== 正则表达式定义 =====
+# 匹配步骤编号的正则表达式
 re_step = re.compile(r"step-(\d+)")
+# 匹配已完成回合数的正则表达式
 re_episode = re.compile(r"# episodes completed so far:\s*(\d+)")
+# 匹配当前总成功率的正则表达式
 re_total = re.compile(r"Current total success rate:\s*([\d\.]+)")
+# 匹配试验次数的正则表达式
 re_trials = re.compile(r"(\d+)trials", re.IGNORECASE)
 
 
 def is_complete(fname: str, episodes: int) -> bool:
+    """
+    判断评估是否完成
+    
+    Args:
+        fname: 文件名
+        episodes: 已完成的回合数
+    Returns:
+        bool: 如果评估完成返回True，否则返回False
+    """
     fn = fname.lower()
     if any(k in fn for k in ["spatial", "object", "goal", "libero_10"]):
         return episodes == 500
@@ -29,17 +50,25 @@ def is_complete(fname: str, episodes: int) -> bool:
 
 
 def get_category(fname: str):
+    """
+    根据文件名获取类别
+    
+    Args:
+        fname: 文件名
+    Returns:
+        str: 类别名称
+    """
     fn = fname.lower()
 
-    # --- special handling for libero_90 with trials count ---
+    # --- 特殊处理带有试验次数的libero_90 ---
     if "libero_90" in fn:
         m = re.search(r"libero_90-(\d+)trials", fn)
         if m:
             trials = m.group(1)
             return f"90-{trials}trials"
-        return "90"  # fallback if no explicit trials count
+        return "90"  # 如果没有明确的试验次数，则回退到默认值
 
-    # --- normal cases ---
+    # --- 正常情况 ---
     for key in ["spatial", "object", "goal", "libero_10"]:
         if key in fn:
             return key.replace("libero_", "")
@@ -47,13 +76,30 @@ def get_category(fname: str):
 
 
 def norm_basename(path: str) -> str:
-    """Normalize base name to dash style for matching run dirs like 'memvla-libero-*.pt'."""
+    """
+    将路径基准名标准化为短横线风格，用于匹配运行目录如'memvla-libero-*.pt'
+    
+    Args:
+        path: 路径字符串
+        
+    Returns:
+        str: 标准化后的基准名
+    """
     b = os.path.basename(path)
     return b.replace("_", "-")
 
 
 def find_eval_root(base: str) -> str | None:
-    """Return the eval_root to use. Prefer base/eval_libero; fallback to parent/eval_libero."""
+    """
+    查找并返回评估根目录
+    优先查找 base/eval_libero；如果不存在则回退到 parent/eval_libero
+    
+    Args:
+        base: 基础路径
+        
+    Returns:
+        str | None: 找到的评估根目录路径，未找到则返回None
+    """
     direct = os.path.join(base, "eval_libero")
     if os.path.isdir(direct):
         return direct
@@ -65,9 +111,16 @@ def find_eval_root(base: str) -> str | None:
 
 def candidate_run_dirs(eval_root: str, base: str) -> list[tuple[str, str]]:
     """
-    Return [(name, run_dir_path), ...].
-    - If eval_root is inside base: include all subdirs.
-    - If eval_root is parent-shared: include only subdirs whose name starts with normalized base name.
+    返回候选的运行目录列表 [(name, run_dir_path), ...]
+    - 如果eval_root在base内部：包含所有子目录
+    - 如果eval_root是父级共享的：只包含名称以标准化base名称开头的子目录
+    
+    Args:
+        eval_root: 评估根目录
+        base: 基础路径
+        
+    Returns:
+        list[tuple[str, str]]: 运行目录列表，每个元素为(目录名, 完整路径)的元组
     """
     inside = eval_root.startswith(os.path.abspath(base) + os.sep)
     all_subdirs = [
@@ -76,7 +129,7 @@ def candidate_run_dirs(eval_root: str, base: str) -> list[tuple[str, str]]:
     ]
     if inside:
         return [(d, os.path.join(eval_root, d)) for d in sorted(all_subdirs)]
-    # parent-shared: filter
+    # 父级共享的情况：过滤
     key = norm_basename(base)
     filtered = [d for d in all_subdirs if d.startswith(key)]
     return [(d, os.path.join(eval_root, d)) for d in sorted(filtered)]
@@ -84,18 +137,24 @@ def candidate_run_dirs(eval_root: str, base: str) -> list[tuple[str, str]]:
 
 def collect_txt_paths(run_dir: str) -> list[str]:
     """
-    Collect *.txt files under run_dir (depth 1) and also under one nested level (depth 2).
-    Handles structures like:
+    收集运行目录下的*.txt文件（深度1）以及嵌套一级目录下的文件（深度2）
+    处理如下结构：
       run_dir/*.txt
       run_dir/<sub>/*.txt
+      
+    Args:
+        run_dir: 运行目录路径
+        
+    Returns:
+        list[str]: txt文件路径列表
     """
     txts = []
-    # depth 1
+    # 深度1
     for name in os.listdir(run_dir):
         p = os.path.join(run_dir, name)
         if os.path.isfile(p) and p.endswith(".txt"):
             txts.append(p)
-    # depth 2
+    # 深度2
     for name in os.listdir(run_dir):
         pdir = os.path.join(run_dir, name)
         if os.path.isdir(pdir):
@@ -107,7 +166,16 @@ def collect_txt_paths(run_dir: str) -> list[str]:
 
 
 def name_from_run_dir(run_dir_name: str) -> str:
-    """Prefer numeric step → '20k'; else use run_dir_name as-is."""
+    """
+    从运行目录名称中提取显示名称
+    优先使用数字步骤 → '20k'；否则直接使用运行目录名称
+    
+    Args:
+        run_dir_name: 运行目录名称
+        
+    Returns:
+        str: 显示名称
+    """
     m = re_step.search(run_dir_name)
     if m:
         step_num = int(m.group(1))
@@ -115,7 +183,7 @@ def name_from_run_dir(run_dir_name: str) -> str:
     return run_dir_name
 
 
-# ===== main =====
+# ===== 主程序 =====
 for base in ckpt_paths:
     eval_root = find_eval_root(base)
     if not eval_root:

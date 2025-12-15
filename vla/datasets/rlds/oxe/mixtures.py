@@ -7,7 +7,7 @@ a float "sampling weight"
 
 from typing import Dict, List, Tuple
 
-# fmt: off
+# FIXME：数据混合构造  fmt: off
 OXE_NAMED_MIXTURES: Dict[str, List[Tuple[str, float]]] = {
     # === Bridge V2 Dataset ===
     "bridge": [

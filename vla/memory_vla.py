@@ -367,6 +367,7 @@ class CogMemBank(nn.Module):
         timesteps: np.array,
     ) -> torch.Tensor:
         """
+        FIXME：记忆处理
         处理一个批次的输入tokens，结合历史记忆进行增强，并返回增强后的特征。
         加入长期记忆(history)
         从历史记忆中检索(cross attention)
@@ -397,7 +398,7 @@ class CogMemBank(nn.Module):
                 self.eid_stream = first_eid
 
         for i in range(B):
-            # 1) episode 管理逻辑
+            # FIXME：1) episode 管理逻辑
             eid = episode_ids[i]
             if self.training:
                 if self.dataloader_type == 'group':
@@ -409,9 +410,11 @@ class CogMemBank(nn.Module):
                         self.clear_episode(episode_ids[i - 1])
                         self.eid_stream = episode_ids[i]
 
-            # 2) 从记忆库中检索历史信息并进行注意力交互
+            # FIXME：2) 从记忆库中检索历史信息并进行注意力交互
+            # 1. 获取当前样本和历史记忆----
             working_mem = tokens[i].unsqueeze(0)  # (1, N, D)
             hist = self.bank.get(eid, [])
+            # ----
             if len(hist) > 0:
                 hist_feats = [feat for _, feat in hist]
                 episode_mem = torch.stack(hist_feats, dim=0).reshape(-1, D).unsqueeze(0)  # (1, T*N, D)
@@ -432,7 +435,7 @@ class CogMemBank(nn.Module):
                 # 没有历史信息时，使用当前工作记忆作为 episode 记忆
                 retrieved_episode_mem = working_mem  # (1, N, D)
 
-            # 3) 记忆融合：将当前工作记忆与检索到的记忆进行融合
+            # FIXME：3) 记忆融合：将当前工作记忆与检索到的记忆进行融合
             if self.fusion_type == 'add':
                 fused_feats = (working_mem + retrieved_episode_mem) * 0.5
             elif self.fusion_type == 'gate':
@@ -440,7 +443,7 @@ class CogMemBank(nn.Module):
 
             outputs.append(fused_feats)
 
-            # 4) 将融合后的特征或原始特征存入记忆库
+            # FIXME：4) 将融合后的特征或原始特征存入记忆库
             timestep_i = timesteps[i] if self.use_timestep_pe else None
             if self.update_fused:
                 self._memory_consolidate(eid, fused_feats.squeeze(0), timestep_i)

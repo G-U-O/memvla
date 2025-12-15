@@ -1,3 +1,11 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
+"""
+LIBERO环境评估脚本
+该脚本用于在LIBERO基准测试环境中评估训练好的模型性能
+"""
+
 import os
 from dataclasses import dataclass
 from typing import List, Union
@@ -5,11 +13,15 @@ import draccus
 import numpy as np
 import tqdm
 
+# 设置MUJOCO使用osmesa渲染模式 FIXME：服务器上使用egl模式
 os.environ['MUJOCO_GL'] = 'osmesa'
 # apt install -y libosmesa6-dev libgl1-mesa-dev libglu1-mesa-dev
 
+
+# 导入LIBERO相关模块
 from libero.libero import benchmark
 
+# 导入自定义工具模块
 from libero_utils import (
     get_libero_env,
     get_libero_image,
@@ -18,120 +30,131 @@ from libero_utils import (
 )
 from robot_utils import DATE_TIME, set_seed_everywhere
 
-# let tensorflow only see CPU
+# 让tensorflow只看到GPU设备
 import tensorflow as tf
 tf.config.set_visible_devices([], 'GPU')
 
 
 @dataclass
 class GenerateConfig:
+    """
+    评估配置类
+    定义评估过程中所需的各种参数
+    """
     # fmt: off
-    task_suite_name: str = "libero_spatial" # Task suite. Options: libero_spatial, libero_object, libero_goal, libero_10, libero_90
-    num_steps_wait: int = 10 # Number of steps to wait for objects to stabilize in sim
-    num_trials_per_task: int = 50 # Number of rollouts per task
-    spcial_task_id: Union[List[int], int, None] = None # List of task IDs to evaluate (default: None, evaluates all tasks in the suite)
-    run_id_note: str = ""
-    local_log_dir: str = "./logs/eval_libero" # Local directory for eval logs
-    seed: int = 7 # Random Seed (for reproducibility)
-    resolution: Union[int, tuple] = 256 # Image resolution for model input
-    port: int = 6800
+    task_suite_name: str = "libero_spatial" # 任务套件名称。可选值: libero_spatial, libero_object, libero_goal, libero_10, libero_90
+    num_steps_wait: int = 10 # 在模拟器中等待对象稳定的步数
+    num_trials_per_task: int = 50 # 每个任务的运行回合数
+    spcial_task_id: Union[List[int], int, None] = None # 要评估的任务ID列表（默认: None，评估套件中的所有任务）
+    run_id_note: str = "" # 运行标识备注
+    local_log_dir: str = "./logs/eval_libero" # 评估日志的本地目录
+    seed: int = 7 # 随机种子（用于可重现性）
+    resolution: Union[int, tuple] = 256 # 模型输入的图像分辨率
+    port: int = 6800 # 服务端口
     # fmt: on
 
 
 @draccus.wrap()
 def eval_libero(cfg: GenerateConfig) -> None:
+    """
+    LIBERO环境评估主函数
+    
+    Args:
+        cfg: 评估配置参数
+    """
     if cfg.spcial_task_id is not None and isinstance(cfg.spcial_task_id, int):
         cfg.spcial_task_id = [cfg.spcial_task_id]
 
-    # Set random seed
+    # 设置随机种子以确保可重现性
     set_seed_everywhere(cfg.seed)
 
-    # Initialize local logging
+    # 初始化本地日志记录
     run_id = f"{cfg.task_suite_name}-{cfg.num_trials_per_task}trials-seed{cfg.seed}-{cfg.run_id_note}-{DATE_TIME}"
     os.makedirs(cfg.local_log_dir, exist_ok=True)
     local_log_filepath = os.path.join(cfg.local_log_dir, run_id + ".txt")
     log_file = open(local_log_filepath, "w")
     print(f"Logging to local log file: {local_log_filepath}")
 
-    # Initialize LIBERO task suite
+    # 初始化LIBERO任务套件
     benchmark_dict = benchmark.get_benchmark_dict()
     task_suite = benchmark_dict[cfg.task_suite_name]()
     num_tasks_in_suite = task_suite.n_tasks
     print(f"Task suite: {cfg.task_suite_name}")
     log_file.write(f"Task suite: {cfg.task_suite_name}\n")
 
-    # Get expected image dimensions
-    resize_size = cfg.resolution # TODO need to be done in the cfg
+    # 获取期望的图像尺寸
+    resize_size = cfg.resolution # TODO 需要在配置中完成
 
     ################################################################
-    ### import Policy
+    ### 导入策略模块
     from vla_policy import LLaVAClient
     policy = LLaVAClient(base_url=f'http://localhost:{cfg.port}')
     ################################################################
 
-    # Start evaluation
+    # 开始评估
     total_episodes, total_successes = 0, 0
     for task_id in tqdm.tqdm(range(num_tasks_in_suite)):
-        # Skip tasks if specified
+        # 如果指定了特定任务，则跳过未指定的任务
         if cfg.spcial_task_id is not None and task_id not in cfg.spcial_task_id:
             print(f"Skipping task {task_id}...")
             continue
 
-        # Get task
+        # 获取任务
         task = task_suite.get_task(task_id)
 
-        # Get default LIBERO initial states
+        # 获取默认的LIBERO初始状态
         initial_states = task_suite.get_task_init_states(task_id)
 
-        # Initialize LIBERO environment and task description
+        # 初始化LIBERO环境和任务描述
         env, task_description = get_libero_env(task, resolution=256)
 
-        # Start episodes
+        # 开始执行回合
         task_episodes, task_successes = 0, 0
         for episode_idx in tqdm.tqdm(range(cfg.num_trials_per_task)):
             print(f"\nTask: {task_description}")
             log_file.write(f"\nTask: {task_description}\n")
 
-            # Reset environment
+            # 重置环境
             env.reset()
             policy.reset()
             episode_first_frame = 'True'
 
-            # Set initial states
+            # 设置初始状态
             obs = env.set_init_state(initial_states[episode_idx])
 
-            # Setup
+            # 环境设置
             t = 0
             replay_images = []
+            # 根据不同的任务套件设置最大步数
             if cfg.task_suite_name == "libero_spatial":
-                max_steps = 220  # longest training demo has 193 steps
+                max_steps = 220  # 最长的训练演示有193步
             elif cfg.task_suite_name == "libero_object":
-                max_steps = 280  # longest training demo has 254 steps
+                max_steps = 280  # 最长的训练演示有254步
             elif cfg.task_suite_name == "libero_goal":
-                max_steps = 300  # longest training demo has 270 steps
+                max_steps = 300  # 最长的训练演示有270步
             elif cfg.task_suite_name == "libero_10":
-                max_steps = 520  # longest training demo has 505 steps
+                max_steps = 520  # 最长的训练演示有505步
             elif cfg.task_suite_name == "libero_90":
-                max_steps = 400  # longest training demo has 373 steps
+                max_steps = 400  # 最长的训练演示有373步
 
             print(f"Starting episode {task_episodes+1}...")
             log_file.write(f"Starting episode {task_episodes+1}...\n")
             while t < max_steps + cfg.num_steps_wait:
                 try:
-                    # IMPORTANT: Do nothing for the first few timesteps because the simulator drops objects
-                    # and we need to wait for them to fall
+                    # 重要：前几个时间步什么都不做，因为模拟器会掉落物体
+                    # 我们需要等待它们稳定下来
                     if t < cfg.num_steps_wait:
                         obs, reward, done, info = env.step([0, 0, 0, 0, 0, 0, -1])
                         t += 1
                         continue
 
-                    # Get preprocessed image
+                    # 获取预处理后的图像
                     img = get_libero_image(obs, resize_size)
 
-                    # Save preprocessed image for replay video
+                    # 保存预处理后的图像用于回放视频
                     replay_images.append(img)
 
-                    # Prepare observations dict
+                    # 准备观测字典
                     observation = {
                         "base_cam": img,
                         "states": np.concatenate(
@@ -140,16 +163,17 @@ def eval_libero(cfg: GenerateConfig) -> None:
                     }
 
                     ###############################################################################
-                    ### here we need to use flask to get the action from the model
-                    ### we need a policy to get the action
+                    ### 这里我们需要使用flask从模型获取动作
+                    ### 我们需要一个策略来获取动作
                     action = policy.process_frame(text=task_description,
                                                   episode_first_frame=episode_first_frame,
                                                   **observation)
 
+                    # 替换分号为空格
                     if ';' in action:
                         action = action.replace(';', ' ')
 
-                    # str to np array
+                    # 字符串转numpy数组
                     action = action.split(' ')
                     action = [float(x) for x in action]
                     action = np.array(action, dtype=float)
@@ -157,7 +181,7 @@ def eval_libero(cfg: GenerateConfig) -> None:
                     episode_first_frame = 'False'
                     action_dim = 7
 
-                    # Adjust gripper action values according to your data's gripper definition
+                    # 根据数据中夹爪的定义调整夹爪动作值
                     for i in range(len(action)):
                         if i % action_dim == action_dim - 1:
                             if action[i] == 1.0:
@@ -170,7 +194,7 @@ def eval_libero(cfg: GenerateConfig) -> None:
                     for i in range(chunk_size):
                         action_chunk = action[i * action_dim:(i + 1) * action_dim]
 
-                        # Execute action in environment
+                        # 在环境中执行动作
                         obs, reward, done, info = env.step(action_chunk)
                         if done:
                             task_successes += 1
@@ -190,7 +214,7 @@ def eval_libero(cfg: GenerateConfig) -> None:
             task_episodes += 1
             total_episodes += 1
 
-            # Save a replay video of the episode
+            # 保存回合的回放视频
             rollout_dir = os.path.join(cfg.local_log_dir, run_id + "_videos")
             save_rollout_video(
                 replay_images, total_episodes,
@@ -199,7 +223,7 @@ def eval_libero(cfg: GenerateConfig) -> None:
                 rollout_dir=rollout_dir,
             )
 
-            # Log current results
+            # 记录当前结果
             print(f"Success: {done}")
             print(f"# episodes completed so far: {total_episodes}")
             print(f"# successes: {total_successes} ({total_successes / total_episodes * 100:.1f}%)")
@@ -208,7 +232,7 @@ def eval_libero(cfg: GenerateConfig) -> None:
             log_file.write(f"# successes: {total_successes} ({total_successes / total_episodes * 100:.1f}%)\n")
             log_file.flush()
 
-        # Log final results
+        # 记录最终结果
         print(f"Current task success rate: {float(task_successes) / float(task_episodes)}")
         print(f"Current total success rate: {float(total_successes) / float(total_episodes)}")
         log_file.write(f"Current task success rate: {float(task_successes) / float(task_episodes)}\n")
