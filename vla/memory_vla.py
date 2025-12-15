@@ -96,36 +96,77 @@ class TimestepEmbedder(nn.Module):
 
 
 class CrossTransformerBlock(nn.Module):
+    """
+    跨注意力变换块，用于实现查询序列与键值序列之间的注意力交互
+    
+    该模块通过交叉注意力机制实现两个不同序列间的特征交互，
+    常用于将当前工作记忆与历史记忆进行融合处理。
+    """
     def __init__(self, feature_dim: int):
+        """
+        初始化交叉注意力变换块
+        
+        Args:
+            feature_dim (int): 特征维度，所有输入输出张量的特征维度大小
+        """
         super().__init__()
+        # 查询、键、值的线性投影层，将输入映射到特征空间
         self.q_proj = nn.Linear(feature_dim, feature_dim)
         self.k_proj = nn.Linear(feature_dim, feature_dim)
         self.v_proj = nn.Linear(feature_dim, feature_dim)
+        # 注意力输出后的层归一化
         self.attn_norm = nn.LayerNorm(feature_dim)
 
-        # Feed‑Forward Network
+        # 前馈神经网络（Feed-Forward Network）
         self.ffn = nn.Sequential(
-            nn.Linear(feature_dim, feature_dim * 4),
-            nn.GELU(),
-            nn.Linear(feature_dim * 4, feature_dim)
+            nn.Linear(feature_dim, feature_dim * 4),  # 特征维度扩展4倍
+            nn.GELU(),                                # GELU激活函数
+            nn.Linear(feature_dim * 4, feature_dim)   # 投影回原始特征维度
         )
+        # 前馈网络输出后的层归一化
         self.ffn_norm = nn.LayerNorm(feature_dim)
 
     def forward(self,
-                query: torch.Tensor, # (B, N, D)
-                k: torch.Tensor, # (B, M, D)
-                v: torch.Tensor, # (B, M, D)
+                query: torch.Tensor, # (B, N, D) - 查询序列
+                k: torch.Tensor,     # (B, M, D) - 键序列
+                v: torch.Tensor      # (B, M, D) - 值序列
                 ) -> torch.Tensor:
+        """
+        前向传播过程，执行交叉注意力计算和前馈网络处理
+        
+        Args:
+            query (torch.Tensor): 查询序列，形状为(B, N, D)
+                B: 批次大小
+                N: 查询序列长度
+                D: 特征维度
+            k (torch.Tensor): 键序列，形状为(B, M, D)
+                M: 键序列长度
+                D: 特征维度（与查询序列一致）
+            v (torch.Tensor): 值序列，形状为(B, M, D)
+                M: 值序列长度（通常与键序列长度相同）
+                D: 特征维度（与键序列一致）
+                
+        Returns:
+            torch.Tensor: 经过交叉注意力和前馈网络处理后的特征，形状为(B, N, D)
+        """
+        # 对查询、键、值进行线性投影
         q = self.q_proj(query)
         k = self.k_proj(k)
         v = self.v_proj(v)
+        
+        # 执行缩放点积注意力计算
+        # 使用查询、键、值计算注意力权重，并应用于值序列
         attn_out = F.scaled_dot_product_attention(q, k, v, dropout_p=0.0, is_causal=False)
 
-        # residual + LN
+        # 残差连接 + 层归一化
+        # 将注意力输出与原始查询进行残差连接，并进行层归一化
         x = self.attn_norm(query + attn_out)
 
-        # FFN + LN
+        # 前馈神经网络处理
         ffn_out = self.ffn(x)
+        
+        # 残差连接 + 层归一化
+        # 将前馈网络输出与输入进行残差连接，并进行层归一化
         return self.ffn_norm(x + ffn_out)
 
 
@@ -1098,6 +1139,22 @@ class MemoryVLA(nn.Module):
 
     @staticmethod
     def _check_unnorm_key(norm_stats, unnorm_key):
+        """
+        检查并验证用于动作反归一化的数据集键名
+        
+        当模型在多个数据集上训练时，需要指定特定的数据集统计信息用于动作反归一化。
+        此方法确保提供了有效的键名，或者在只有一个数据集时自动选择。
+        
+        Args:
+            norm_stats (dict): 包含各数据集归一化统计信息的字典
+            unnorm_key (str, optional): 指定用于反归一化的数据集键名
+            
+        Returns:
+            str: 验证后的数据集键名
+            
+        Raises:
+            AssertionError: 当存在多个数据集但未指定键名，或指定的键名不存在时抛出
+        """
         if unnorm_key is None:
             assert len(norm_stats) == 1, (
                 f"Your model was trained on more than one dataset, "
@@ -1113,11 +1170,31 @@ class MemoryVLA(nn.Module):
         return unnorm_key
 
     def get_action_dim(self, unnorm_key=None):
-        """Dimensionality of the policy's action space."""
+        """
+        获取策略动作空间的维度
+        
+        根据指定数据集的归一化统计信息，返回动作空间的维度大小。
+        
+        Args:
+            unnorm_key (str, optional): 指定用于获取动作维度的数据集键名
+            
+        Returns:
+            int: 动作空间的维度大小
+        """
         unnorm_key = self._check_unnorm_key(self.norm_stats, unnorm_key)
         return len(self.norm_stats[unnorm_key]["action"]["q01"])
 
     def get_action_stats(self, unnorm_key=None):
-        """Dimensionality of the policy's action space."""
+        """
+        获取策略动作空间的统计信息
+        
+        根据指定数据集的归一化统计信息，返回动作空间的完整统计信息。
+        
+        Args:
+            unnorm_key (str, optional): 指定用于获取动作统计信息的数据集键名
+            
+        Returns:
+            dict: 动作空间的统计信息字典
+        """
         unnorm_key = self._check_unnorm_key(self.norm_stats, unnorm_key)
         return self.norm_stats[unnorm_key]["action"]
