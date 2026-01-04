@@ -14,7 +14,7 @@ import numpy as np
 import tqdm
 
 # 设置MUJOCO使用osmesa渲染模式 FIXME：服务器上使用egl模式
-os.environ['MUJOCO_GL'] = 'osmesa'
+# os.environ['MUJOCO_GL'] = 'osmesa'
 # apt install -y libosmesa6-dev libgl1-mesa-dev libglu1-mesa-dev
 
 
